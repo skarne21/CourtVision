@@ -130,7 +130,7 @@ def engineer_missing_player_value(df_players, team_game_logs):
     team_game_logs = pd.merge(team_game_logs, df_missing, on=['GAME_ID', 'TEAM_ID'], how='left')
     team_game_logs['MISSING_PLAYER_VALUE'] = team_game_logs['MISSING_PLAYER_VALUE'].fillna(0)
     
-    return team_game_logs
+    return team_game_logs, df_players
 
 def engineer_elo(df):
     print("\nCalculating Pre-Game Elo Ratings...")
@@ -254,15 +254,15 @@ def engineer_features(df):
     return df
 
 if __name__ == "__main__":
-    # 1. Fetch 3 years of data instead of 1
-    seasons_to_pull = ["2021-22", "2022-23", "2023-24"]
+    # 1. Fetch historical data including the actual current 2025-26 season
+    seasons_to_pull = ["2021-22", "2022-23", "2023-24", "2024-25", "2025-26"]
     nba_df = fetch_multiple_seasons(seasons_to_pull)
     players_df = fetch_multiple_seasons_players(seasons_to_pull)
     
     if not nba_df.empty:
         # Run the entire feature engineering pipeline
         # First, calculate missing player value and merge it to the raw team logs
-        nba_df = engineer_missing_player_value(players_df, nba_df)
+        nba_df, processed_players_df = engineer_missing_player_value(players_df, nba_df)
         nba_df = engineer_elo(nba_df)
         featured_df = engineer_features(nba_df)
         
@@ -338,6 +338,12 @@ if __name__ == "__main__":
         # 2. Save the cleaned dataframe to a local SQLite database
         conn = sqlite3.connect('nba_data.db')
         featured_df.to_sql('team_stats', conn, if_exists='replace', index=False)
+        
+        # Save the absolute latest PRA for every player so our API can use it for live injuries
+        print("Saving latest player PRAs for live injury calculations...")
+        latest_players = processed_players_df.sort_values('GAME_DATE').groupby('PLAYER_NAME').tail(1)
+        latest_players[['PLAYER_NAME', 'TEAM_ABBREVIATION', 'ROLLING_PRA']].to_sql('player_stats', conn, if_exists='replace', index=False)
+        
         conn.close()
         print("Data saved to local database 'nba_data.db'")
 
