@@ -137,6 +137,27 @@ function injectPredictionCard(
   // Get the full name for readability
   const predictedFullName = fullTeamNames[predictedAbbrev] || predictedAbbrev;
 
+  // Phase 5: Calculate Expected Value (Edge) & Confidence
+  const aiProbFloat = parseFloat(aiWinProb);
+  const marketProbFloat = parseFloat(marketProb) || 0;
+  let edgeHtml = "";
+  if (marketProbFloat > 0) {
+    const edge = aiProbFloat - marketProbFloat;
+    const edgeColor = edge > 5 ? "#10b981" : edge > 0 ? "#f59e0b" : "#ef4444";
+    const edgeLabel =
+      edge > 5
+        ? "HIGH CONFIDENCE"
+        : edge > 0
+          ? "MEDIUM CONFIDENCE"
+          : "LOW/NO EDGE";
+    edgeHtml = `
+      <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #1e293b; text-align: center;">
+        <span style="font-size: 11px; color: #94a3b8;">EXPECTED VALUE:</span>
+        <span style="font-size: 13px; font-weight: bold; color: ${edgeColor}; margin-left: 6px;">${edge > 0 ? "+" : ""}${edge.toFixed(1)}% EDGE (${edgeLabel})</span>
+      </div>
+    `;
+  }
+
   // Build the specialized UI
   card = document.createElement("div");
   card.id = "courtvision-card";
@@ -175,6 +196,7 @@ function injectPredictionCard(
             <div style="font-size: 16px; font-weight: 700; color: #10b981;">${aiWinProb}%</div>
           </div>
         </div>
+        ${edgeHtml}
       </div>
     </div>
   `;
@@ -232,9 +254,36 @@ function injectSidebar(targetContainer, rankingData) {
       const fullAway = fullTeamNames[parts[0]] || parts[0];
       const fullHome = fullTeamNames[parts[1]] || parts[1];
 
+      // Phase 5: Edge Calculation for Sidebar
+      const aiProb = parseFloat(data.win_probability);
+      const marketProbVal = parseFloat(data.marketProb) || 0;
+      let edgeColor = "#94a3b8";
+      let edgeStr = "";
+      let borderStyle = "4px solid #334155";
+
+      if (marketProbVal > 0) {
+        const edge = aiProb - marketProbVal;
+        if (edge > 5) {
+          edgeColor = "#10b981";
+          borderStyle = "4px solid #10b981";
+          edgeStr = `+${edge.toFixed(1)}% Edge`;
+        } else if (edge > 0) {
+          edgeColor = "#f59e0b";
+          borderStyle = "4px solid #f59e0b";
+          edgeStr = `+${edge.toFixed(1)}% Edge`;
+        } else {
+          edgeColor = "#ef4444";
+          borderStyle = "4px solid #ef4444";
+          edgeStr = `${edge.toFixed(1)}% Edge`;
+        }
+      }
+
       return `
-    <div class="cv-game-card">
-      <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">${fullAway} @ ${fullHome}</div>
+    <div class="cv-game-card" style="border-left: ${borderStyle}">
+      <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px; display: flex; justify-content: space-between;">
+        <span>${fullAway} @ ${fullHome}</span>
+        <span style="color: ${edgeColor}; font-weight: 700;">${edgeStr}</span>
+      </div>
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <span style="font-size: 15px; font-weight: bold; color: #f8fafc; max-width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${fullTeamNames[data.predicted_winner] || data.predicted_winner}</span>
         <div style="display: flex; gap: 12px; align-items: center;">
