@@ -282,7 +282,7 @@ function injectPredictionCard(
   card.id = "courtvision-card";
   card.dataset.matchup = predictionData.matchup;
   card.style.cssText = `
-    position: fixed; top: 80px; right: 20px; z-index: 999999;
+    position: fixed; bottom: 20px; right: 20px; z-index: 999999;
     background: linear-gradient(145deg, #1e293b, #0f172a);
     border: 1px solid #334155; border-radius: 12px; padding: 16px;
     color: white; font-family: system-ui, -apple-system, sans-serif;
