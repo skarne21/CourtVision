@@ -2,8 +2,8 @@ import pandas as pd
 from nba_api.stats.endpoints import leaguegamelog
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit, PredefinedSplit
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-from xgboost import XGBClassifier
-from sklearn.metrics import brier_score_loss, log_loss
+from xgboost import XGBClassifier, XGBRegressor
+from sklearn.metrics import brier_score_loss, log_loss, mean_absolute_error, mean_squared_error
 import numpy as np
 import joblib
 import sqlite3
@@ -358,6 +358,74 @@ if __name__ == "__main__":
 
         joblib.dump(calibrated_model, 'nba_model_calibrated.joblib')
         print("Model saved as 'nba_model_calibrated.joblib'")
+
+        # =====================================================================
+        # REGRESSION MODELS: Spread & Total (Phase 8)
+        # =====================================================================
+        print("\n\n=== Training Regression Models (Spread & Total) ===")
+
+        # Filter to home-team rows only — gives one row per game with a well-defined
+        # home_margin (home_pts - away_pts) and total_pts (home_pts + away_pts).
+        home_df = featured_df[featured_df['is_home'] == 1].copy()
+        home_df['home_margin'] = home_df['PTS'] - home_df['PTS_allowed']
+        home_df['total_pts']   = home_df['PTS'] + home_df['PTS_allowed']
+
+        X_reg      = home_df[predictive_features]
+        y_spread   = home_df['home_margin']
+        y_total    = home_df['total_pts']
+
+        # 80/20 chronological split — no calibration set needed for regression
+        n_reg = len(X_reg)
+        split_reg = int(n_reg * 0.80)
+        X_reg_train, X_reg_test   = X_reg.iloc[:split_reg],    X_reg.iloc[split_reg:]
+        y_spread_train, y_spread_test = y_spread.iloc[:split_reg], y_spread.iloc[split_reg:]
+        y_total_train,  y_total_test  = y_total.iloc[:split_reg],  y_total.iloc[split_reg:]
+
+        reg_param_grid = {
+            'n_estimators':  [100, 200],
+            'learning_rate': [0.05, 0.1],
+            'max_depth':     [3, 4],
+            'subsample':     [0.8, 1.0],
+        }
+        tscv_reg = TimeSeriesSplit(n_splits=5)
+
+        # --- Spread model ---
+        print("\nTraining Spread Model (XGBRegressor)...")
+        spread_gs = GridSearchCV(
+            XGBRegressor(random_state=42),
+            reg_param_grid, cv=tscv_reg,
+            scoring='neg_mean_absolute_error', n_jobs=-1
+        )
+        spread_gs.fit(X_reg_train, y_spread_train)
+        model_spread   = spread_gs.best_estimator_
+        spread_preds   = model_spread.predict(X_reg_test)
+        spread_sigma   = float(np.std(y_spread_test.values - spread_preds))
+        spread_mae     = mean_absolute_error(y_spread_test, spread_preds)
+        spread_rmse    = float(np.sqrt(mean_squared_error(y_spread_test, spread_preds)))
+        print(f"Spread → MAE: {spread_mae:.2f} pts | RMSE: {spread_rmse:.2f} pts | Sigma: {spread_sigma:.2f} pts")
+        print(f"Best params: {spread_gs.best_params_}")
+
+        # --- Total model ---
+        print("\nTraining Total Model (XGBRegressor)...")
+        total_gs = GridSearchCV(
+            XGBRegressor(random_state=42),
+            reg_param_grid, cv=tscv_reg,
+            scoring='neg_mean_absolute_error', n_jobs=-1
+        )
+        total_gs.fit(X_reg_train, y_total_train)
+        model_total   = total_gs.best_estimator_
+        total_preds   = model_total.predict(X_reg_test)
+        total_sigma   = float(np.std(y_total_test.values - total_preds))
+        total_mae     = mean_absolute_error(y_total_test, total_preds)
+        total_rmse    = float(np.sqrt(mean_squared_error(y_total_test, total_preds)))
+        print(f"Total  → MAE: {total_mae:.2f} pts | RMSE: {total_rmse:.2f} pts | Sigma: {total_sigma:.2f} pts")
+        print(f"Best params: {total_gs.best_params_}")
+
+        # Save regression models and their residual sigmas (needed for norm.cdf in api.py)
+        joblib.dump(model_spread, 'model_spread.joblib')
+        joblib.dump(model_total,  'model_total.joblib')
+        joblib.dump({'spread_sigma': spread_sigma, 'total_sigma': total_sigma}, 'model_metadata.joblib')
+        print("\nSaved: model_spread.joblib | model_total.joblib | model_metadata.joblib")
 
         # 2. Save the cleaned dataframe to a local SQLite database
         conn = sqlite3.connect('nba_data.db')

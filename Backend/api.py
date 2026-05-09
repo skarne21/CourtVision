@@ -1,9 +1,11 @@
 from fastapi import FastAPI, HTTPException
+from typing import Optional
 import joblib
 import sqlite3
 import pandas as pd
 from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
+from scipy import stats as scipy_stats
 from live_injuries import get_live_injuries
 import time
 
@@ -12,14 +14,30 @@ app = FastAPI()
 # Enable CORS so the Chrome Extension can talk to the API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allows requests from any website (like Kalshi)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load the model once when the server starts
+# Moneyline classifier (calibrated)
 model = joblib.load('nba_model_calibrated.joblib')
+
+# Regression models — loaded once at startup, fallback gracefully if not yet trained
+try:
+    model_spread = joblib.load('model_spread.joblib')
+    model_total  = joblib.load('model_total.joblib')
+    _meta        = joblib.load('model_metadata.joblib')
+    SPREAD_SIGMA = _meta['spread_sigma']
+    TOTAL_SIGMA  = _meta['total_sigma']
+    print(f"Spread model loaded (sigma={SPREAD_SIGMA:.2f} pts)")
+    print(f"Total  model loaded (sigma={TOTAL_SIGMA:.2f} pts)")
+except FileNotFoundError:
+    model_spread = None
+    model_total  = None
+    SPREAD_SIGMA = 12.0
+    TOTAL_SIGMA  = 12.0
+    print("Warning: spread/total models not found — run scraper.py to generate them.")
 
 # These are the exact features our model was trained on in scraper.py
 PREDICTIVE_FEATURES = [
@@ -50,7 +68,13 @@ def read_root():
     return {"status": "CourtVision API is running live!"}
 
 @app.get("/predict")
-def predict_game(home_team: str, away_team: str):
+def predict_game(
+    home_team: str,
+    away_team: str,
+    market_type: str = "moneyline",
+    line: Optional[float] = None,
+    spread_team: Optional[str] = None,
+):
     global last_scrape_time, cached_injuries_df
     try:
         # 1. Fetch the latest stats for BOTH teams from our database
@@ -119,24 +143,76 @@ def predict_game(home_team: str, away_team: str):
         for col in PREDICTIVE_FEATURES[7:]:
             input_data.loc[0, col] = home_df[col].values[0]
             
-        # CRITICAL FIX: Convert all columns to strictly numeric so XGBoost doesn't crash
+        # Convert all columns to strictly numeric so XGBoost doesn't crash
         input_data = input_data.astype(float)
-            
-        # 3. Make the prediction!
-        # predict() returns 1 (Win) or 0 (Loss)
-        # predict_proba() returns probabilities for [prob_loss, prob_win]
-        prediction = int(model.predict(input_data)[0])
+
+        matchup = f"{away_team.upper()} @ {home_team.upper()}"
+
+        # ── SPREAD ───────────────────────────────────────────────────────────
+        if market_type == "spread":
+            if model_spread is None:
+                raise HTTPException(status_code=503, detail="Spread model not loaded. Run scraper.py first.")
+            if line is None:
+                raise HTTPException(status_code=400, detail="'line' parameter required for spread market.")
+
+            predicted_margin = float(model_spread.predict(input_data)[0])
+
+            # Determine covering direction.
+            # spread_team is the team Kalshi says must win by > line.
+            # Model always predicts home_margin (home_pts - away_pts).
+            covering = (spread_team or home_team).upper()
+            if covering == home_team.upper():
+                # P(home_margin > line)
+                cover_prob = float(1 - scipy_stats.norm.cdf(line, loc=predicted_margin, scale=SPREAD_SIGMA))
+            else:
+                # P(away_margin > line)  =  P(home_margin < -line)
+                cover_prob = float(scipy_stats.norm.cdf(-line, loc=predicted_margin, scale=SPREAD_SIGMA))
+
+            return {
+                "matchup": matchup,
+                "market_type": "spread",
+                "line": line,
+                "spread_team": covering,
+                "predicted_margin": round(predicted_margin, 1),
+                "win_probability": round(cover_prob * 100, 2),
+                "recommendation": "YES" if cover_prob >= 0.5 else "NO",
+                "message": f"Spread: {covering} covers {line:+.1f} pts with {cover_prob*100:.1f}% probability",
+            }
+
+        # ── TOTAL ─────────────────────────────────────────────────────────────
+        if market_type == "total":
+            if model_total is None:
+                raise HTTPException(status_code=503, detail="Total model not loaded. Run scraper.py first.")
+            if line is None:
+                raise HTTPException(status_code=400, detail="'line' parameter required for total market.")
+
+            predicted_total = float(model_total.predict(input_data)[0])
+            # P(actual_total > line)
+            over_prob = float(1 - scipy_stats.norm.cdf(line, loc=predicted_total, scale=TOTAL_SIGMA))
+
+            return {
+                "matchup": matchup,
+                "market_type": "total",
+                "line": line,
+                "predicted_total": round(predicted_total, 1),
+                "win_probability": round(over_prob * 100, 2),
+                "recommendation": "YES" if over_prob >= 0.5 else "NO",
+                "message": f"Total: projected {predicted_total:.1f} pts vs line {line} ({over_prob*100:.1f}% over)",
+            }
+
+        # ── MONEYLINE (default) ───────────────────────────────────────────────
+        prediction    = int(model.predict(input_data)[0])
         probabilities = model.predict_proba(input_data)[0]
-        
-        # If prediction is 1, home team wins. If 0, away team wins.
+
         predicted_winner = home_team.upper() if prediction == 1 else away_team.upper()
         confidence = float(probabilities[1]) if prediction == 1 else float(probabilities[0])
-        
+
         return {
-            "matchup": f"{away_team.upper()} @ {home_team.upper()}",
-            "predicted_winner": predicted_winner, 
-            "win_probability": round(confidence * 100, 2), # Convert decimal to percentage
-            "message": "Real AI prediction & Market Odds generated successfully!"
+            "matchup": matchup,
+            "market_type": "moneyline",
+            "predicted_winner": predicted_winner,
+            "win_probability": round(confidence * 100, 2),
+            "message": "Real AI prediction & Market Odds generated successfully!",
         }
         
     except Exception as e:
