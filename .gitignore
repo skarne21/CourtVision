@@ -53,3 +53,6 @@ venv.bak/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+
+# Claude session context (local only)
+CLAUDE.md
