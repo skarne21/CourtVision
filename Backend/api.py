@@ -19,7 +19,7 @@ app.add_middleware(
 )
 
 # Load the model once when the server starts
-model = joblib.load('nba_model.joblib')
+model = joblib.load('nba_model_calibrated.joblib')
 
 # These are the exact features our model was trained on in scraper.py
 PREDICTIVE_FEATURES = [

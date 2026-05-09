@@ -1,8 +1,10 @@
 import pandas as pd
 from nba_api.stats.endpoints import leaguegamelog
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from xgboost import XGBClassifier
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import brier_score_loss, log_loss
+import numpy as np
 import joblib
 import sqlite3
 import time # ADD THIS to the top of your imports
@@ -286,54 +288,69 @@ if __name__ == "__main__":
         X = featured_df[predictive_features] # The data the model learns from
         y = featured_df['target_win']        # The answer key (did the team win?)
 
-        # --- Step 3: The Chronological Train/Test Split ---
-        # We split the data chronologically to simulate real-world prediction.
-        # shuffle=False is critical for time-series/sports data!
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+        # --- Step 3: Three-Way Chronological Split (70 / 15 / 15) ---
+        # 70% train -> GridSearchCV, 15% calibration -> isotonic fit, 15% test -> final eval.
+        # Strictly chronological -- no shuffle -- to prevent look-ahead leakage.
+        n = len(X)
+        train_end = int(n * 0.70)
+        cal_end   = int(n * 0.85)
 
-        print(f"\nTraining model on {len(X_train)} games, testing on {len(X_test)} games.")
+        X_train, y_train = X.iloc[:train_end],        y.iloc[:train_end]
+        X_cal,   y_cal   = X.iloc[train_end:cal_end], y.iloc[train_end:cal_end]
+        X_test,  y_test  = X.iloc[cal_end:],          y.iloc[cal_end:]
 
-        # --- Step 4 & 2: Train an Advanced Model (XGBoost + GridSearchCV) ---
+        print(f"\nSplit: {len(X_train)} train / {len(X_cal)} calibration / {len(X_test)} test games.")
+
+        # --- Step 4: Train XGBoost with TimeSeriesSplit + neg_log_loss ---
         print("\nFinding the best hyperparameters for XGBoost...")
         param_grid = {
             'n_estimators': [100, 200, 300],
             'learning_rate': [0.01, 0.05, 0.1],
             'max_depth': [3, 4, 5],
-            'subsample': [0.8, 1.0] # Helps prevent overfitting
+            'subsample': [0.8, 1.0]
         }
-        
+
+        tscv = TimeSeriesSplit(n_splits=5)
         xgb = XGBClassifier(random_state=42, eval_metric='logloss')
-        grid_search = GridSearchCV(estimator=xgb, param_grid=param_grid, cv=3, scoring='accuracy', n_jobs=-1)
+        grid_search = GridSearchCV(estimator=xgb, param_grid=param_grid, cv=tscv, scoring='neg_log_loss', n_jobs=-1)
         grid_search.fit(X_train, y_train)
-        
+
         print(f"Best Parameters Found: {grid_search.best_params_}")
-        model = grid_search.best_estimator_ # Use the best model found
+        best_model = grid_search.best_estimator_
 
-        # Make predictions on the unseen test data
-        predictions = model.predict(X_test)
+        # --- Step 5: Fit Isotonic Calibration on the held-out calibration set ---
+        print("\nFitting isotonic calibration layer...")
+        calibrated_model = CalibratedClassifierCV(best_model, method='isotonic', cv='prefit')
+        calibrated_model.fit(X_cal, y_cal)
 
-        # Evaluate the model's performance
-        print("\n--- Model Evaluation ---")
-        print(f"Model Accuracy on Test Set: {accuracy_score(y_test, predictions):.2%}")
-        print("\nClassification Report:")
-        print(classification_report(y_test, predictions, target_names=['Loss', 'Win']))
+        # --- Step 6: Betting-Grade Evaluation on the final test set ---
+        y_prob = calibrated_model.predict_proba(X_test)[:, 1]
 
-        # --- Step 1: Check Under the Hood (Feature Importances) ---
-        # Create a DataFrame of feature importances
+        brier = brier_score_loss(y_test, y_prob)
+        ll    = log_loss(y_test, y_prob)
+
+        fraction_of_positives, mean_predicted = calibration_curve(y_test, y_prob, n_bins=10)
+        ece = float(np.mean(np.abs(fraction_of_positives - mean_predicted)))
+
+        print("\n--- Betting-Grade Model Evaluation ---")
+        print(f"Brier Score : {brier:.4f}  (lower is better, random baseline = 0.25)")
+        print(f"Log Loss    : {ll:.4f}  (lower is better, random baseline = 0.693)")
+        print(f"ECE         : {ece:.4f}  (lower is better, perfect calibration = 0.00)")
+
+        # --- Feature Importances (from the underlying XGBoost model) ---
         feature_importances = pd.DataFrame({
             'Feature': X.columns,
-            'Importance': model.feature_importances_
+            'Importance': best_model.feature_importances_
         }).sort_values(by='Importance', ascending=False)
-        
+
         print("\n--- Feature Importances ---")
         print(feature_importances.head(10))
 
-        # --- NEW CODE: Save Model and Data ---
+        # --- Save Model and Data ---
         print("\n--- Saving Assets ---")
-        
-        # 1. Save the trained Random Forest model
-        joblib.dump(model, 'nba_model.joblib')
-        print("Model saved as 'nba_model.joblib'")
+
+        joblib.dump(calibrated_model, 'nba_model_calibrated.joblib')
+        print("Model saved as 'nba_model_calibrated.joblib'")
 
         # 2. Save the cleaned dataframe to a local SQLite database
         conn = sqlite3.connect('nba_data.db')
