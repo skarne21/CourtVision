@@ -51,9 +51,11 @@ const locationToAbbrev = {
   "LA Clippers": "LAC",
   Clippers: "LAC",
   "Los Angeles Clippers": "LAC",
+  "Los Angeles C": "LAC",
   "LA Lakers": "LAL",
   Lakers: "LAL",
   "Los Angeles Lakers": "LAL",
+  "Los Angeles L": "LAL",
   Memphis: "MEM",
   Miami: "MIA",
   Milwaukee: "MIL",
@@ -84,10 +86,16 @@ const predictionCache = {};
 // Detect whether the current page is a spread or total market, and extract the line.
 // Returns { type: "moneyline"|"spread"|"total", line: number|null, spreadTeam: string|null }
 function detectMarketContext(pageText) {
-  const spreadMatch = pageText.match(/([A-Za-z\s]+?)\s+wins by over\s+(\d+\.?\d*)\s+points/i);
-  const totalMatch  = pageText.match(/Over\s+(\d+\.?\d*)\s+points scored/i);
+  const spreadMatch = pageText.match(
+    /([A-Za-z\s]+?)\s+wins by over\s+(\d+\.?\d*)\s+points/i,
+  );
+  const totalMatch = pageText.match(/Over\s+(\d+\.?\d*)\s+points scored/i);
   if (spreadMatch) {
-    return { type: "spread", line: parseFloat(spreadMatch[2]), spreadTeam: spreadMatch[1].trim() };
+    return {
+      type: "spread",
+      line: parseFloat(spreadMatch[2]),
+      spreadTeam: spreadMatch[1].trim(),
+    };
   }
   if (totalMatch) {
     return { type: "total", line: parseFloat(totalMatch[1]), spreadTeam: null };
@@ -108,18 +116,32 @@ function findTeamAbbrev(teamStr) {
   return null;
 }
 
-async function getPrediction(awayTeam, homeTeam, marketType = "moneyline", line = null, spreadTeam = null) {
-  console.log(`🧠 Asking API: ${awayTeam} @ ${homeTeam} [${marketType}${line != null ? " " + line : ""}]`);
+async function getPrediction(
+  awayTeam,
+  homeTeam,
+  marketType = "moneyline",
+  line = null,
+  spreadTeam = null,
+) {
+  console.log(
+    `🧠 Asking API: ${awayTeam} @ ${homeTeam} [${marketType}${line != null ? " " + line : ""}]`,
+  );
   try {
     let url = `http://127.0.0.1:8000/predict?home_team=${homeTeam}&away_team=${awayTeam}&market_type=${marketType}`;
-    if (line != null)       url += `&line=${line}`;
-    if (spreadTeam != null) url += `&spread_team=${encodeURIComponent(spreadTeam)}`;
+    if (line != null) url += `&line=${line}`;
+    if (spreadTeam != null)
+      url += `&spread_team=${encodeURIComponent(spreadTeam)}`;
 
     const response = await fetch(url);
     if (!response.ok) {
       let errorDetail = "Unknown Error";
-      try { const errData = await response.json(); errorDetail = errData.detail || errorDetail; } catch (e) {}
-      throw new Error(`API error! status: ${response.status}, Detail: ${errorDetail}`);
+      try {
+        const errData = await response.json();
+        errorDetail = errData.detail || errorDetail;
+      } catch (e) {}
+      throw new Error(
+        `API error! status: ${response.status}, Detail: ${errorDetail}`,
+      );
     }
     return await response.json();
   } catch (error) {
@@ -151,18 +173,23 @@ function injectPredictionCard(
     card.remove();
   }
 
-  const aiWinProb  = predictionData.win_probability;
+  const aiWinProb = predictionData.win_probability;
   const marketProb = predictionData.marketProb || "--";
-  const mtype      = predictionData.market_type || "moneyline";
+  const mtype = predictionData.market_type || "moneyline";
 
   // Edge calculation (shared across all market types)
-  const aiProbFloat     = parseFloat(aiWinProb);
+  const aiProbFloat = parseFloat(aiWinProb);
   const marketProbFloat = parseFloat(marketProb) || 0;
   let edgeHtml = "";
   if (marketProbFloat > 0) {
     const edge = aiProbFloat - marketProbFloat;
     const edgeColor = edge > 5 ? "#10b981" : edge > 0 ? "#f59e0b" : "#ef4444";
-    const edgeLabel = edge > 5 ? "HIGH CONFIDENCE" : edge > 0 ? "MEDIUM CONFIDENCE" : "LOW/NO EDGE";
+    const edgeLabel =
+      edge > 5
+        ? "HIGH CONFIDENCE"
+        : edge > 0
+          ? "MEDIUM CONFIDENCE"
+          : "LOW/NO EDGE";
     edgeHtml = `
       <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #1e293b; text-align: center;">
         <span style="font-size: 11px; color: #94a3b8;">EXPECTED VALUE:</span>
@@ -171,32 +198,80 @@ function injectPredictionCard(
   }
 
   // Build market-specific body copy
-  let headerLabel, bodyHtml, recHtml = "";
+  let headerLabel,
+    bodyHtml,
+    recHtml = "";
   if (mtype === "spread") {
-    const spreadTeamFull = fullTeamNames[predictionData.spread_team] || predictionData.spread_team;
-    const projMargin     = predictionData.predicted_margin;
-    const recColor       = predictionData.recommendation === "YES" ? "#10b981" : "#ef4444";
+    const spreadTeamFull =
+      fullTeamNames[predictionData.spread_team] || predictionData.spread_team;
+    const projMargin = predictionData.predicted_margin;
+    const recColor =
+      predictionData.recommendation === "YES" ? "#10b981" : "#ef4444";
     headerLabel = "CourtVision Spread Analysis";
-    bodyHtml    = `<b>${spreadTeamFull}</b> wins by over <b>${predictionData.line}</b> pts<br>
+    bodyHtml = `<b>${spreadTeamFull}</b> wins by over <b>${predictionData.line}</b> pts<br>
                    <span style="font-size:13px;color:#94a3b8;">Projected margin: ${projMargin > 0 ? "+" : ""}${projMargin} pts</span>`;
-    recHtml     = `<div style="text-align:center;margin-top:8px;">
+    recHtml = `<div style="text-align:center;margin-top:8px;">
                      <span style="font-size:18px;font-weight:900;color:${recColor};">${predictionData.recommendation}</span>
                      <span style="font-size:11px;color:#94a3b8;margin-left:6px;">(Cover ${predictionData.recommendation === "YES" ? "likely" : "unlikely"})</span>
                    </div>`;
   } else if (mtype === "total") {
-    const recColor = predictionData.recommendation === "YES" ? "#10b981" : "#ef4444";
+    const recColor =
+      predictionData.recommendation === "YES" ? "#10b981" : "#ef4444";
     headerLabel = "CourtVision Total Analysis";
-    bodyHtml    = `Projected total: <b>${predictionData.predicted_total} pts</b><br>
+    bodyHtml = `Projected total: <b>${predictionData.predicted_total} pts</b><br>
                    <span style="font-size:13px;color:#94a3b8;">Line: ${predictionData.line} pts</span>`;
-    recHtml     = `<div style="text-align:center;margin-top:8px;">
+    recHtml = `<div style="text-align:center;margin-top:8px;">
                      <span style="font-size:18px;font-weight:900;color:${recColor};">${predictionData.recommendation === "YES" ? "OVER" : "UNDER"}</span>
                      <span style="font-size:11px;color:#94a3b8;margin-left:6px;">(${predictionData.recommendation === "YES" ? "Over" : "Under"} likely)</span>
                    </div>`;
   } else {
-    const predictedFullName = fullTeamNames[predictionData.predicted_winner] || predictionData.predicted_winner;
+    const predictedFullName =
+      fullTeamNames[predictionData.predicted_winner] ||
+      predictionData.predicted_winner;
     headerLabel = "CourtVision AI Insight";
-    bodyHtml    = `The model projects the <b>${predictedFullName}</b> to win this matchup.`;
+    bodyHtml = `The model projects the <b>${predictedFullName}</b> to win this matchup.`;
   }
+
+  // Build both-sides labels and complementary probabilities
+  const side2AiProb   = (100 - aiProbFloat).toFixed(2);
+  const side2MktProb  = marketProbFloat > 0 ? (100 - marketProbFloat).toFixed(0) + "%" : "--";
+  let side1Label, side2Label;
+  if (mtype === "spread") {
+    const spreadTeamFull = fullTeamNames[predictionData.spread_team] || predictionData.spread_team;
+    const parts = predictionData.matchup.split(" @ ");
+    const otherAbbrev = predictionData.spread_team === parts[0] ? parts[1] : parts[0];
+    const otherFull   = fullTeamNames[otherAbbrev] || otherAbbrev;
+    side1Label = `${spreadTeamFull} covers`;
+    side2Label = `${otherFull} covers`;
+  } else if (mtype === "total") {
+    side1Label = `Over ${predictionData.line}`;
+    side2Label = `Under ${predictionData.line}`;
+  } else {
+    const winnerFull = fullTeamNames[predictionData.predicted_winner] || predictionData.predicted_winner;
+    const parts = predictionData.matchup.split(" @ ");
+    const loserAbbrev = predictionData.predicted_winner === parts[0] ? parts[1] : parts[0];
+    const loserFull   = fullTeamNames[loserAbbrev] || loserAbbrev;
+    side1Label = winnerFull;
+    side2Label = loserFull;
+  }
+
+  const probTableHtml = `
+    <div style="background:#1e293b;padding:10px 12px;border-radius:6px;">
+      <div style="display:grid;grid-template-columns:1fr 56px 64px;gap:4px;align-items:center;font-size:10px;color:#94a3b8;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px;">
+        <span></span><span style="text-align:right;">MARKET</span><span style="text-align:right;">AI PROB</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 56px 64px;gap:4px;align-items:center;margin-bottom:4px;">
+        <span style="font-size:12px;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${side1Label}</span>
+        <span style="font-size:15px;font-weight:600;color:#cbd5e1;text-align:right;">${marketProb}</span>
+        <span style="font-size:15px;font-weight:700;color:#10b981;text-align:right;">${aiWinProb}%</span>
+      </div>
+      <div style="border-top:1px solid #334155;margin:5px 0;"></div>
+      <div style="display:grid;grid-template-columns:1fr 56px 64px;gap:4px;align-items:center;">
+        <span style="font-size:12px;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${side2Label}</span>
+        <span style="font-size:15px;font-weight:600;color:#cbd5e1;text-align:right;">${side2MktProb}</span>
+        <span style="font-size:15px;font-weight:700;color:#10b981;text-align:right;">${side2AiProb}%</span>
+      </div>
+    </div>`;
 
   // Build the card
   card = document.createElement("div");
@@ -207,23 +282,14 @@ function injectPredictionCard(
     background: linear-gradient(145deg, #1e293b, #0f172a);
     border: 1px solid #334155; border-radius: 12px; padding: 16px;
     color: white; font-family: system-ui, -apple-system, sans-serif;
-    box-shadow: 0 10px 25px rgba(0,0,0,0.5); width: 350px;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.5); width: 370px;
   `;
   card.innerHTML = `
     <div style="display:flex;gap:12px;margin-bottom:8px;font-family:sans-serif;">
       <div style="flex:1;background:#0f172a;padding:12px;border-radius:8px;border:1px solid #1e293b;">
         <div style="font-size:12px;font-weight:bold;color:#38bdf8;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">${headerLabel}</div>
         <div style="font-size:15px;color:#f8fafc;margin-bottom:12px;line-height:1.5;">${bodyHtml}</div>
-        <div style="display:flex;align-items:center;justify-content:space-between;background:#1e293b;padding:12px;border-radius:6px;">
-          <div style="text-align:left;">
-            <div style="font-size:11px;color:#94a3b8;margin-bottom:4px;">MARKET PROB</div>
-            <div style="font-size:16px;font-weight:600;color:#cbd5e1;">${marketProb}</div>
-          </div>
-          <div style="text-align:right;">
-            <div style="font-size:11px;color:#94a3b8;margin-bottom:4px;">AI PROB</div>
-            <div style="font-size:16px;font-weight:700;color:#10b981;">${aiWinProb}%</div>
-          </div>
-        </div>
+        ${probTableHtml}
         ${recHtml}
         ${edgeHtml}
       </div>
@@ -362,6 +428,7 @@ async function scanForMatchups() {
     "g",
   );
   const matches = [...pageText.matchAll(matchupRegex)];
+  console.log(`[CourtVision] regex found ${matches.length} raw matchup(s):`, matches.map(m => `${m[1]} at ${m[2]}`));
 
   const uniqueMatchups = [];
   const seen = new Set();
@@ -400,20 +467,33 @@ async function scanForMatchups() {
     window.location.href.includes("/markets/") ||
     window.location.href.includes("/events/");
 
-  const marketCtx = isMarketPage ? detectMarketContext(pageText) : { type: "moneyline", line: null, spreadTeam: null };
+  const marketCtx = isMarketPage
+    ? detectMarketContext(pageText)
+    : { type: "moneyline", line: null, spreadTeam: null };
 
   // Resolve the spread team string (e.g. "LA Lakers") to an abbreviation if possible
-  const spreadTeamAbbrev = marketCtx.spreadTeam ? (findTeamAbbrev(marketCtx.spreadTeam) || marketCtx.spreadTeam) : null;
+  const spreadTeamAbbrev = marketCtx.spreadTeam
+    ? findTeamAbbrev(marketCtx.spreadTeam) || marketCtx.spreadTeam
+    : null;
 
   // Build a cache key that encodes the full market context so different markets on the
   // same teams don't collide (e.g. moneyline vs. spread vs. total).
-  const marketSuffix = marketCtx.type !== "moneyline" ? `:${marketCtx.type}:${marketCtx.line}` : "";
+  const marketSuffix =
+    marketCtx.type !== "moneyline"
+      ? `:${marketCtx.type}:${marketCtx.line}`
+      : "";
 
   // Fetch predictions for any NEW games we haven't seen yet
   const fetchPromises = uniqueMatchups.map(async (m) => {
     const cacheKey = m.key + marketSuffix;
     if (!predictionCache[cacheKey]) {
-      const data = await getPrediction(m.awayAbbrev, m.homeAbbrev, marketCtx.type, marketCtx.line, spreadTeamAbbrev);
+      const data = await getPrediction(
+        m.awayAbbrev,
+        m.homeAbbrev,
+        marketCtx.type,
+        marketCtx.line,
+        spreadTeamAbbrev,
+      );
       if (data) predictionCache[cacheKey] = data;
     }
   });
@@ -507,17 +587,30 @@ async function scanForMatchups() {
     if (data) {
       // For moneyline, find the predicted winner's name/location for DOM prob extraction.
       // For spread/total the market prob is for the Yes contract on the line, same logic.
-      const winnerAbbrev  = data.predicted_winner || data.spread_team || mainMatch.homeAbbrev;
+      const winnerAbbrev =
+        data.predicted_winner || data.spread_team || mainMatch.homeAbbrev;
       const predictedFullName = fullTeamNames[winnerAbbrev] || winnerAbbrev;
       const locationName =
-        winnerAbbrev === mainMatch.awayAbbrev ? mainMatch.awayLocation : mainMatch.homeLocation;
+        winnerAbbrev === mainMatch.awayAbbrev
+          ? mainMatch.awayLocation
+          : mainMatch.homeLocation;
       const opponentAbbrev =
-        winnerAbbrev === mainMatch.awayAbbrev ? mainMatch.homeAbbrev : mainMatch.awayAbbrev;
+        winnerAbbrev === mainMatch.awayAbbrev
+          ? mainMatch.homeAbbrev
+          : mainMatch.awayAbbrev;
       const opponentFullName = fullTeamNames[opponentAbbrev] || opponentAbbrev;
 
-      data.marketProb = getMarketProbFromDOM(predictedFullName, locationName, opponentFullName);
+      data.marketProb = getMarketProbFromDOM(
+        predictedFullName,
+        locationName,
+        opponentFullName,
+      );
 
-      injectPredictionCard(document.body, data, fullTeamNames[mainMatch.homeAbbrev]);
+      injectPredictionCard(
+        document.body,
+        data,
+        fullTeamNames[mainMatch.homeAbbrev],
+      );
     }
   } else {
     // MAIN PAGE MODE: sidebar always shows moneyline rankings
