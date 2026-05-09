@@ -1,6 +1,6 @@
 import pandas as pd
 from nba_api.stats.endpoints import leaguegamelog
-from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit, PredefinedSplit
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from xgboost import XGBClassifier
 from sklearn.metrics import brier_score_loss, log_loss
@@ -319,9 +319,16 @@ if __name__ == "__main__":
         best_model = grid_search.best_estimator_
 
         # --- Step 5: Fit Isotonic Calibration on the held-out calibration set ---
+        # PredefinedSplit tells sklearn: train base model on X_train (-1 fold),
+        # fit isotonic layer on X_cal (0 fold). Equivalent to the removed cv='prefit'.
         print("\nFitting isotonic calibration layer...")
-        calibrated_model = CalibratedClassifierCV(best_model, method='isotonic', cv='prefit')
-        calibrated_model.fit(X_cal, y_cal)
+        test_fold = np.concatenate([np.full(len(X_train), -1), np.zeros(len(X_cal))])
+        ps = PredefinedSplit(test_fold)
+        X_trainval = pd.concat([X_train, X_cal])
+        y_trainval = pd.concat([y_train, y_cal])
+        best_xgb = XGBClassifier(**grid_search.best_params_, random_state=42, eval_metric='logloss')
+        calibrated_model = CalibratedClassifierCV(best_xgb, method='isotonic', cv=ps)
+        calibrated_model.fit(X_trainval, y_trainval)
 
         # --- Step 6: Betting-Grade Evaluation on the final test set ---
         y_prob = calibrated_model.predict_proba(X_test)[:, 1]
