@@ -204,11 +204,15 @@ function injectPredictionCard(
   if (mtype === "spread") {
     const spreadTeamFull =
       fullTeamNames[predictionData.spread_team] || predictionData.spread_team;
+    const parts = predictionData.matchup.split(" @ ");
+    const otherAbbrev = predictionData.spread_team === parts[0] ? parts[1] : parts[0];
+    const otherFull = fullTeamNames[otherAbbrev] || otherAbbrev;
+    const aiCoverTeam = aiProbFloat >= 50 ? spreadTeamFull : otherFull;
     const projMargin = predictionData.predicted_margin;
     const recColor =
       predictionData.recommendation === "YES" ? "#10b981" : "#ef4444";
     headerLabel = "CourtVision Spread Analysis";
-    bodyHtml = `<b>${spreadTeamFull}</b> wins by over <b>${predictionData.line}</b> pts<br>
+    bodyHtml = `<b>${aiCoverTeam}</b> covers the <b>${predictionData.line}</b> pt spread<br>
                    <span style="font-size:13px;color:#94a3b8;">Projected margin: ${projMargin > 0 ? "+" : ""}${projMargin} pts</span>`;
     recHtml = `<div style="text-align:center;margin-top:8px;">
                      <span style="font-size:18px;font-weight:900;color:${recColor};">${predictionData.recommendation}</span>
