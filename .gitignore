@@ -56,3 +56,4 @@ venv.bak/
 
 # Claude session context (local only)
 CLAUDE.md
+GEMINI.md
