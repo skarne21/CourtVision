@@ -79,6 +79,30 @@ const fullTeamNames = Object.fromEntries(
   Object.entries(teamAbbreviations).map(([name, abbrev]) => [abbrev, name]),
 );
 
+const FEATURE_LABELS = {
+  ELO:                     "Home Elo strength",
+  ELO_opp:                 "Away Elo strength",
+  PLUS_MINUS_roll_10:      "10-game +/- trend",
+  PLUS_MINUS_roll_5:       "5-game +/- trend",
+  rest_differential:       "Rest advantage",
+  days_rest:               "Days of rest",
+  MISSING_PLAYER_VALUE:    "Home injuries",
+  MISSING_PLAYER_VALUE_opp:"Away injuries",
+  is_home:                 "Home court",
+  PTS_roll_10:             "10-game scoring",
+  PTS_roll_5:              "5-game scoring",
+  PTS_allowed_roll_10:     "10-game defense",
+  PTS_allowed_roll_5:      "5-game defense",
+  eFG_roll_10:             "10-game shooting",
+  eFG_roll_5:              "5-game shooting",
+  AST_roll_10:             "10-game assists",
+  AST_roll_5:              "5-game assists",
+  REB_roll_10:             "10-game rebounds",
+  REB_roll_5:              "5-game rebounds",
+  TOV_roll_10:             "10-game turnovers",
+  TOV_roll_5:              "5-game turnovers",
+};
+
 // Cache predictions so we don't request the same game twice
 // Key format: "AWAY@HOME" for moneyline, "AWAY@HOME:spread:5.5" for spread, etc.
 const predictionCache = {};
@@ -150,6 +174,36 @@ async function getPrediction(
   }
 }
 
+// For spread/total pages, extract market prob from page text near the market description.
+// Kalshi innerText separates values with newlines and dumps ~50 slider options between the
+// market description and the percentage, so we need a large search window (800 chars).
+function getSpreadTotalMarketProb(pageText, marketCtx) {
+  if (marketCtx.type === 'spread' && marketCtx.line != null) {
+    const escaped = String(marketCtx.line).replace('.', '\\.');
+    // Matches "wins by over\n6.5\npoints\n[slider noise]\n44%"
+    const m = pageText.match(new RegExp(`wins by over[\\s\\S]{1,15}?${escaped}[\\s\\S]{1,800}?(\\d{1,2})%`));
+    if (m) return m[1] + "%";
+  }
+  if (marketCtx.type === 'total' && marketCtx.line != null) {
+    const escaped = String(marketCtx.line).replace('.', '\\.');
+    // Matches "Over\n228.5\npoints scored\n[slider noise]\n41%"
+    const m = pageText.match(new RegExp(`Over[\\s\\S]{1,15}?${escaped}[\\s\\S]{1,800}?(\\d{1,2})%`));
+    if (m) return m[1] + "%";
+  }
+  return "--";
+}
+
+function findGameLink(awayLocation, homeLocation, occurrenceIndex) {
+  let count = 0;
+  for (const anchor of document.querySelectorAll('a[href]')) {
+    if (anchor.textContent.includes(awayLocation) && anchor.textContent.includes(homeLocation)) {
+      if (count === occurrenceIndex) return anchor.href;
+      count++;
+    }
+  }
+  return null;
+}
+
 function removeSingleCard() {
   const el = document.getElementById("courtvision-card");
   if (el) el.remove();
@@ -164,12 +218,13 @@ function injectPredictionCard(
   targetContainer,
   predictionData,
   marketTargetTeamName,
+  bankroll = 0
 ) {
   let card = document.getElementById("courtvision-card");
   if (card) {
-    // If the card is already showing THIS matchup, do nothing.
-    if (card.dataset.matchup === predictionData.matchup) return;
-    // Otherwise, the user clicked a new game, so remove the old card
+    // Include line in the key so the card re-renders when the spread/total slider changes.
+    const cardKey = predictionData.matchup + (predictionData.line != null ? `:${predictionData.line}` : '');
+    if (card.dataset.matchup === cardKey) return;
     card.remove();
   }
 
@@ -181,6 +236,15 @@ function injectPredictionCard(
   const aiProbFloat = parseFloat(aiWinProb);
   const marketProbFloat = parseFloat(marketProb) || 0;
   let edgeHtml = "";
+  let kellyHtml = "";
+  let contributionsHtml = "";
+
+  const liveWarningHtml = predictionData.isLive
+    ? `<div style="background:#451a03;border:1px solid #92400e;border-radius:6px;padding:6px 10px;margin-bottom:10px;text-align:center;">
+        <span style="font-size:11px;color:#fbbf24;font-weight:700;">⚠ LIVE GAME — pre-game model, current score not factored in</span>
+      </div>`
+    : "";
+
   if (marketProbFloat > 0) {
     const edge = aiProbFloat - marketProbFloat;
     const edgeColor = edge > 5 ? "#10b981" : edge > 0 ? "#f59e0b" : "#ef4444";
@@ -194,6 +258,46 @@ function injectPredictionCard(
       <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #1e293b; text-align: center;">
         <span style="font-size: 11px; color: #94a3b8;">EXPECTED VALUE:</span>
         <span style="font-size: 13px; font-weight: bold; color: ${edgeColor}; margin-left: 6px;">${edge > 0 ? "+" : ""}${edge.toFixed(1)}% EDGE (${edgeLabel})</span>
+      </div>`;
+
+    // Kelly Criterion calculation
+    const p = aiProbFloat / 100;
+    const c = marketProbFloat / 100;
+    const kelly = (p - c) / (1 - c);
+    
+    if (bankroll > 0) {
+      if (kelly > 0) {
+        const cappedKelly = Math.min(Math.max(kelly, 0), 0.25);
+        const stake = cappedKelly * bankroll;
+        kellyHtml = `
+          <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #1e293b; text-align: center;">
+            <span style="font-size: 11px; color: #94a3b8;">RECOMMENDED BET:</span>
+            <span style="font-size: 13px; font-weight: bold; color: #38bdf8; margin-left: 6px;">$${stake.toFixed(2)} (${(cappedKelly * 100).toFixed(1)}% of bankroll)</span>
+          </div>`;
+      }
+    } else {
+      kellyHtml = `
+        <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #1e293b; text-align: center;">
+          <span style="font-size: 11px; color: #94a3b8;">Set bankroll in extension popup to see stake size.</span>
+        </div>`;
+    }
+  }
+
+  // SHAP feature contributions
+  if (predictionData.feature_contributions && predictionData.feature_contributions.length > 0) {
+    const rows = predictionData.feature_contributions.map(({ feature, impact }) => {
+      const label = FEATURE_LABELS[feature] || feature;
+      const color = impact > 0 ? "#10b981" : "#ef4444";
+      const sign = impact > 0 ? "+" : "";
+      return `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
+        <span style="font-size:11px;color:#94a3b8;">${label}</span>
+        <span style="font-size:11px;font-weight:700;color:${color};">${sign}${impact.toFixed(3)}</span>
+      </div>`;
+    }).join("");
+    contributionsHtml = `
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #1e293b;">
+        <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:6px;">Why this pick</div>
+        ${rows}
       </div>`;
   }
 
@@ -280,7 +384,7 @@ function injectPredictionCard(
   // Build the card
   card = document.createElement("div");
   card.id = "courtvision-card";
-  card.dataset.matchup = predictionData.matchup;
+  card.dataset.matchup = predictionData.matchup + (predictionData.line != null ? `:${predictionData.line}` : '');
   card.style.cssText = `
     position: fixed; bottom: 20px; right: 20px; z-index: 999999;
     background: linear-gradient(145deg, #1e293b, #0f172a);
@@ -291,11 +395,14 @@ function injectPredictionCard(
   card.innerHTML = `
     <div style="display:flex;gap:12px;margin-bottom:8px;font-family:sans-serif;">
       <div style="flex:1;background:#0f172a;padding:12px;border-radius:8px;border:1px solid #1e293b;">
+        ${liveWarningHtml}
         <div style="font-size:12px;font-weight:bold;color:#38bdf8;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">${headerLabel}</div>
         <div style="font-size:15px;color:#f8fafc;margin-bottom:12px;line-height:1.5;">${bodyHtml}</div>
         ${probTableHtml}
         ${recHtml}
         ${edgeHtml}
+        ${kellyHtml}
+        ${contributionsHtml}
       </div>
     </div>
   `;
@@ -340,8 +447,14 @@ function injectSidebar(targetContainer, rankingData) {
       color: white;
       font-family: system-ui, -apple-system, sans-serif;
       box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
-      width: 360px; /* Made slightly wider to fit both probabilities */
+      width: 360px;
     `;
+    sidebar.addEventListener('click', (e) => {
+      const card = e.target.closest('.cv-game-card');
+      if (!card) return;
+      const link = findGameLink(card.dataset.away, card.dataset.home, parseInt(card.dataset.occurrence || '0'));
+      if (link) window.location.href = link;
+    });
     targetContainer.appendChild(sidebar);
   }
 
@@ -378,7 +491,8 @@ function injectSidebar(targetContainer, rankingData) {
       }
 
       return `
-    <div class="cv-game-card" style="border-left: ${borderStyle}">
+    <div class="cv-game-card" style="border-left: ${borderStyle}; cursor: pointer;"
+         data-away="${data.awayLocation}" data-home="${data.homeLocation}" data-occurrence="${data.occurrenceIndex ?? 0}">
       <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px; display: flex; justify-content: space-between;">
         <span>${fullAway} @ ${fullHome}</span>
         <span style="color: ${edgeColor}; font-weight: 700;">${edgeStr}</span>
@@ -423,6 +537,9 @@ function injectSidebar(targetContainer, rankingData) {
 
 // This function runs periodically to look for NBA matchups on the screen
 async function scanForMatchups() {
+  const storageRes = await chrome.storage.local.get('bankroll');
+  const bankroll = parseFloat(storageRes.bankroll) || 0;
+
   const pageText = document.body.innerText;
 
   const locations = Object.keys(locationToAbbrev).join("|");
@@ -435,9 +552,9 @@ async function scanForMatchups() {
   console.log(`[CourtVision] regex found ${matches.length} raw matchup(s):`, matches.map(m => `${m[1]} at ${m[2]}`));
 
   const uniqueMatchups = [];
-  const seen = new Set();
+  const seenKeys = new Set(); // used only to deduplicate API fetches, not sidebar entries
+  const occurrenceCount = {};
 
-  // Extract unique games
   for (const match of matches) {
     const awayLocation = match[1];
     const homeLocation = match[2];
@@ -445,17 +562,19 @@ async function scanForMatchups() {
     const homeAbbrev = locationToAbbrev[homeLocation];
     const key = `${awayAbbrev}@${homeAbbrev}`;
 
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniqueMatchups.push({
-        awayAbbrev,
-        homeAbbrev,
-        awayLocation,
-        homeLocation,
-        key,
-        textIndex: match.index, // Save the exact pixel/text location of this game
-      });
-    }
+    const occurrenceIndex = occurrenceCount[key] ?? 0;
+    occurrenceCount[key] = occurrenceIndex + 1;
+
+    uniqueMatchups.push({
+      awayAbbrev,
+      homeAbbrev,
+      awayLocation,
+      homeLocation,
+      key,
+      textIndex: match.index,
+      occurrenceIndex,
+    });
+    seenKeys.add(key);
   }
 
   // If we left the basketball page, hide the UI completely
@@ -487,10 +606,11 @@ async function scanForMatchups() {
       ? `:${marketCtx.type}:${marketCtx.line}`
       : "";
 
-  // Fetch predictions for any NEW games we haven't seen yet
-  const fetchPromises = uniqueMatchups.map(async (m) => {
-    const cacheKey = m.key + marketSuffix;
+  // Fetch predictions for any NEW team combos we haven't cached yet (one fetch per unique matchup)
+  const fetchPromises = [...seenKeys].map(async (key) => {
+    const cacheKey = key + marketSuffix;
     if (!predictionCache[cacheKey]) {
+      const m = uniqueMatchups.find(x => x.key === key);
       const data = await getPrediction(
         m.awayAbbrev,
         m.homeAbbrev,
@@ -568,7 +688,7 @@ async function scanForMatchups() {
     return "--";
   };
 
-  if (isMarketPage || uniqueMatchups.length === 1) {
+  if (isMarketPage) {
     // SINGLE GAME MODE: Hide the sidebar, show the detailed card
     removeSidebar();
     let mainMatch = uniqueMatchups[0]; // Fallback to the first found game
@@ -604,16 +724,17 @@ async function scanForMatchups() {
           : mainMatch.awayAbbrev;
       const opponentFullName = fullTeamNames[opponentAbbrev] || opponentAbbrev;
 
-      data.marketProb = getMarketProbFromDOM(
-        predictedFullName,
-        locationName,
-        opponentFullName,
-      );
+      data.marketProb = marketCtx.type !== 'moneyline'
+        ? getSpreadTotalMarketProb(pageText, marketCtx)
+        : getMarketProbFromDOM(predictedFullName, locationName, opponentFullName);
+
+      data.isLive = /\bLIVE\b/.test(pageText);
 
       injectPredictionCard(
         document.body,
         data,
         fullTeamNames[mainMatch.homeAbbrev],
+        bankroll
       );
     }
   } else {
@@ -645,6 +766,9 @@ async function scanForMatchups() {
               locationName,
               opponentFullName,
             ),
+            awayLocation: m.awayLocation,
+            homeLocation: m.homeLocation,
+            occurrenceIndex: m.occurrenceIndex,
           };
         }
         return null;
@@ -658,5 +782,12 @@ async function scanForMatchups() {
   }
 }
 
-// Run the scanner every 3 seconds to catch dynamic page loads
-setInterval(scanForMatchups, 3000);
+// Run the scanner every 3 seconds to catch dynamic page loads.
+// Stop automatically if the extension is reloaded/updated (context invalidated).
+const _cvInterval = setInterval(async () => {
+  if (!chrome.runtime?.id) {
+    clearInterval(_cvInterval);
+    return;
+  }
+  await scanForMatchups();
+}, 3000);

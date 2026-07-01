@@ -3,6 +3,7 @@ from typing import Optional
 import joblib
 import sqlite3
 import pandas as pd
+import xgboost as xgb
 from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 from scipy import stats as scipy_stats
@@ -46,6 +47,13 @@ PREDICTIVE_FEATURES = [
     'PTS_roll_5', 'PTS_allowed_roll_5', 'eFG_roll_5', 'PLUS_MINUS_roll_5', 'AST_roll_5', 'REB_roll_5', 'TOV_roll_5',
     'PTS_roll_10', 'PTS_allowed_roll_10', 'eFG_roll_10', 'PLUS_MINUS_roll_10', 'AST_roll_10', 'REB_roll_10', 'TOV_roll_10'
 ]
+
+def get_shap_contributions(booster, input_df, top_n=3):
+    dmat = xgb.DMatrix(input_df, feature_names=list(input_df.columns))
+    contribs = booster.predict(dmat, pred_contribs=True)
+    shap_vals = contribs[0][:-1]  # drop bias term
+    pairs = sorted(zip(input_df.columns, shap_vals), key=lambda x: abs(x[1]), reverse=True)
+    return [{"feature": f, "impact": round(float(v), 4)} for f, v in pairs[:top_n]]
 
 # Global cache so we don't spam ESPN on multi-game pages
 last_scrape_time = 0
@@ -177,6 +185,7 @@ def predict_game(
                 "win_probability": round(cover_prob * 100, 2),
                 "recommendation": "YES" if cover_prob >= 0.5 else "NO",
                 "message": f"Spread: {covering} covers {line:+.1f} pts with {cover_prob*100:.1f}% probability",
+                "feature_contributions": get_shap_contributions(model_spread.get_booster(), input_data),
             }
 
         # ── TOTAL ─────────────────────────────────────────────────────────────
@@ -198,6 +207,7 @@ def predict_game(
                 "win_probability": round(over_prob * 100, 2),
                 "recommendation": "YES" if over_prob >= 0.5 else "NO",
                 "message": f"Total: projected {predicted_total:.1f} pts vs line {line} ({over_prob*100:.1f}% over)",
+                "feature_contributions": get_shap_contributions(model_total.get_booster(), input_data),
             }
 
         # ── MONEYLINE (default) ───────────────────────────────────────────────
@@ -207,11 +217,13 @@ def predict_game(
         predicted_winner = home_team.upper() if prediction == 1 else away_team.upper()
         confidence = float(probabilities[1]) if prediction == 1 else float(probabilities[0])
 
+        xgb_model = model.calibrated_classifiers_[0].estimator
         return {
             "matchup": matchup,
             "market_type": "moneyline",
             "predicted_winner": predicted_winner,
             "win_probability": round(confidence * 100, 2),
+            "feature_contributions": get_shap_contributions(xgb_model.get_booster(), input_data),
             "message": "Real AI prediction & Market Odds generated successfully!",
         }
         

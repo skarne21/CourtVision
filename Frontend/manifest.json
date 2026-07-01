@@ -3,8 +3,12 @@
   "name": "CourtVision Pro",
   "version": "1.0",
   "description": "Injects XGBoost NBA predictions directly into Kalshi.",
-  "permissions": ["activeTab"],
+  "permissions": ["activeTab", "storage"],
   "host_permissions": ["https://kalshi.com/*", "http://127.0.0.1:8000/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "CourtVision Settings"
+  },
   "content_scripts": [
     {
       "matches": ["https://kalshi.com/*"],
