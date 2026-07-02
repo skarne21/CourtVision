@@ -8,6 +8,8 @@ import numpy as np
 import joblib
 import sqlite3
 import time # ADD THIS to the top of your imports
+import sys
+sys.stdout.reconfigure(encoding='utf-8')  # Windows cp1252 console chokes on → / emoji in prints
 
 
 def fetch_multiple_seasons(seasons=["2021-22", "2022-23", "2023-24"]):
