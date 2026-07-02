@@ -101,6 +101,18 @@ const FEATURE_LABELS = {
   REB_roll_5:              "5-game rebounds",
   TOV_roll_10:             "10-game turnovers",
   TOV_roll_5:              "5-game turnovers",
+  MISSING_USAGE_PCT:       "Home usage lost",
+  MISSING_USAGE_PCT_opp:   "Away usage lost",
+  PACE_roll_5:             "5-game pace",
+  PACE_roll_10:            "10-game pace",
+  OFF_RTG_roll_5:          "5-game off. rating",
+  OFF_RTG_roll_10:         "10-game off. rating",
+  DEF_RTG_roll_5:          "5-game def. rating",
+  DEF_RTG_roll_10:         "10-game def. rating",
+  OFF_RTG_roll_5_opp:      "Away 5-game off. rating",
+  OFF_RTG_roll_10_opp:     "Away 10-game off. rating",
+  DEF_RTG_roll_5_opp:      "Away 5-game def. rating",
+  DEF_RTG_roll_10_opp:     "Away 10-game def. rating",
 };
 
 // Cache predictions so we don't request the same game twice

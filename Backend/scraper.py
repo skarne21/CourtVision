@@ -9,6 +9,7 @@ import joblib
 import sqlite3
 import time # ADD THIS to the top of your imports
 import sys
+from features import PREDICTIVE_FEATURES
 sys.stdout.reconfigure(encoding='utf-8')  # Windows cp1252 console chokes on → / emoji in prints
 
 
@@ -115,15 +116,19 @@ def engineer_missing_player_value(df_players, team_game_logs):
                 players_who_played = current_game_data['PLAYER_ID'].tolist()
                 
                 missing_pra_total = 0
-                
+                roster_total_pra = sum(recent_roster.values())
+
                 for player_id, expected_pra in recent_roster.items():
                     if player_id not in players_who_played:
                         missing_pra_total += expected_pra
-                
+
                 game_team_missing_value.append({
                     'GAME_ID': game,
                     'TEAM_ID': team,
-                    'MISSING_PLAYER_VALUE': missing_pra_total
+                    'MISSING_PLAYER_VALUE': missing_pra_total,
+                    # Losing 30 PRA cripples a thin roster more than a deep one —
+                    # normalize by the roster's total expected production.
+                    'MISSING_USAGE_PCT': missing_pra_total / roster_total_pra if roster_total_pra > 0 else 0.0,
                 })
                 
                 recent_roster = dict(zip(current_game_data['PLAYER_ID'], current_game_data['ROLLING_PRA']))
@@ -133,6 +138,7 @@ def engineer_missing_player_value(df_players, team_game_logs):
     
     team_game_logs = pd.merge(team_game_logs, df_missing, on=['GAME_ID', 'TEAM_ID'], how='left')
     team_game_logs['MISSING_PLAYER_VALUE'] = team_game_logs['MISSING_PLAYER_VALUE'].fillna(0)
+    team_game_logs['MISSING_USAGE_PCT'] = team_game_logs['MISSING_USAGE_PCT'].fillna(0)
     
     return team_game_logs, df_players
 
@@ -208,21 +214,33 @@ def engineer_features(df):
     df['days_rest'] = df.groupby('TEAM_ID')['GAME_DATE'].diff().dt.days
     df['days_rest'] = df['days_rest'].fillna(8) # Assume 8 days rest for the first game of the season
 
+    # Possessions estimate (standard team-level formula) — needed for Pace and
+    # Offensive/Defensive Rating so the model measures efficiency, not just raw
+    # points inflated by fast play.
+    df['POSS'] = df['FGA'] - df['OREB'] + df['TOV'] + 0.44 * df['FTA']
+
     # Prepare a slim version of the dataframe for merging opponent stats
-    opponent_stats = df[['GAME_ID', 'TEAM_ID', 'days_rest', 'PTS', 'MISSING_PLAYER_VALUE', 'ELO']].copy()
-    
+    opponent_stats = df[['GAME_ID', 'TEAM_ID', 'days_rest', 'PTS', 'MISSING_PLAYER_VALUE', 'MISSING_USAGE_PCT', 'ELO', 'POSS']].copy()
+
     # Merge to get opponent data on the same row
     df = pd.merge(df, opponent_stats, on='GAME_ID', suffixes=('', '_opp'))
-    
+
     # Filter out rows where a team is matched with itself
     df = df[df['TEAM_ID'] != df['TEAM_ID_opp']]
-    
+
     # Now, create the differential and opponent-based features
     df['rest_differential'] = df['days_rest'] - df['days_rest_opp']
     df.rename(columns={'PTS_opp': 'PTS_allowed'}, inplace=True)
-    
+
     # Clean up merge helper columns
     df = df.drop(columns=['TEAM_ID_opp', 'days_rest_opp'])
+
+    # Efficiency metrics: points per 100 possessions, and pace per 48 minutes
+    # (MIN is total player-minutes, 240 in regulation — /5 gives game minutes,
+    # which correctly deflates overtime games).
+    df['OFF_RTG'] = 100 * df['PTS'] / df['POSS']
+    df['DEF_RTG'] = 100 * df['PTS_allowed'] / df['POSS_opp']
+    df['PACE'] = 48 * ((df['POSS'] + df['POSS_opp']) / 2) / (df['MIN'] / 5)
 
     # --- Task 4 & 5: Compute Rolling Averages (with Lookahead Bias Prevention) ---
     # Re-sort to ensure calculations are chronological per team
@@ -233,7 +251,7 @@ def engineer_features(df):
     df['eFG'] = df['eFG'].fillna(0) # Handle cases with 0 field goal attempts
 
     # Define the stats we want to create rolling averages for
-    stats_to_roll = ['PTS', 'PTS_allowed', 'eFG', 'PLUS_MINUS', 'AST', 'REB', 'TOV']
+    stats_to_roll = ['PTS', 'PTS_allowed', 'eFG', 'PLUS_MINUS', 'AST', 'REB', 'TOV', 'PACE', 'OFF_RTG', 'DEF_RTG']
     
     # This combined operation is crucial:
     # 1. It groups by team.
@@ -248,6 +266,14 @@ def engineer_features(df):
             df[col_name] = df.groupby(['SEASON_STR', 'TEAM_ID'])[stat].transform(
                 lambda x: x.rolling(window=window, min_periods=1).mean().shift(1)
             )
+
+    # Merge the OPPONENT's rolling efficiency ratings onto each row so the model
+    # can compare "my offense vs. their defense" directly (ELO_opp alone only
+    # proxies overall strength). Rolled columns are already shift(1)-safe.
+    opp_roll = df[['GAME_ID', 'TEAM_ID', 'OFF_RTG_roll_5', 'OFF_RTG_roll_10', 'DEF_RTG_roll_5', 'DEF_RTG_roll_10']].copy()
+    opp_roll.columns = ['GAME_ID', 'TEAM_ID_b', 'OFF_RTG_roll_5_opp', 'OFF_RTG_roll_10_opp', 'DEF_RTG_roll_5_opp', 'DEF_RTG_roll_10_opp']
+    df = pd.merge(df, opp_roll, on='GAME_ID')
+    df = df[df['TEAM_ID'] != df['TEAM_ID_b']].drop(columns=['TEAM_ID_b'])
 
     # --- Task 6 & Final Cleanup ---
     # Drop the original matchup string and any rows with NaN from the rolling calcs
@@ -269,7 +295,14 @@ if __name__ == "__main__":
         nba_df, processed_players_df = engineer_missing_player_value(players_df, nba_df)
         nba_df = engineer_elo(nba_df)
         featured_df = engineer_features(nba_df)
-        
+
+        # CRITICAL: engineer_features returns rows sorted by TEAM_ID, not date.
+        # Without this re-sort the 70/15/15 split below slices by team blocks, and
+        # since every game appears twice (once per team's perspective) the mirrored
+        # row of a "test" game can sit in training — leaking outcomes and inflating
+        # every reported metric. Re-sort so the split is genuinely chronological.
+        featured_df = featured_df.sort_values(by=['GAME_DATE', 'GAME_ID']).reset_index(drop=True)
+
         print("\n--- Feature Engineering Complete ---")
         print(f"Original rows: {len(nba_df)}, Final rows for modeling: {len(featured_df)}")
 
@@ -280,12 +313,7 @@ if __name__ == "__main__":
         # --- Step 2: Isolate the Features ---
         # These are the pre-game stats the model will use to make a prediction.
         # We exclude post-game stats like 'PTS' or identifying info like 'GAME_DATE'.
-        predictive_features = [
-            'is_home', 'days_rest', 'rest_differential', 'MISSING_PLAYER_VALUE', 'MISSING_PLAYER_VALUE_opp',
-            'ELO', 'ELO_opp',
-            'PTS_roll_5', 'PTS_allowed_roll_5', 'eFG_roll_5', 'PLUS_MINUS_roll_5', 'AST_roll_5', 'REB_roll_5', 'TOV_roll_5',
-            'PTS_roll_10', 'PTS_allowed_roll_10', 'eFG_roll_10', 'PLUS_MINUS_roll_10', 'AST_roll_10', 'REB_roll_10', 'TOV_roll_10'
-        ]
+        predictive_features = PREDICTIVE_FEATURES  # shared with api.py via features.py
 
         X = featured_df[predictive_features] # The data the model learns from
         y = featured_df['target_win']        # The answer key (did the team win?)
@@ -426,7 +454,13 @@ if __name__ == "__main__":
         # Save regression models and their residual sigmas (needed for norm.cdf in api.py)
         joblib.dump(model_spread, 'model_spread.joblib')
         joblib.dump(model_total,  'model_total.joblib')
-        joblib.dump({'spread_sigma': spread_sigma, 'total_sigma': total_sigma}, 'model_metadata.joblib')
+        # ml_test_start marks the first date of the moneyline test window (last 15%)
+        # so backtest.py can evaluate on exactly the games no model ever saw.
+        joblib.dump({
+            'spread_sigma': spread_sigma,
+            'total_sigma': total_sigma,
+            'ml_test_start': str(featured_df['GAME_DATE'].iloc[cal_end].date()),
+        }, 'model_metadata.joblib')
         print("\nSaved: model_spread.joblib | model_total.joblib | model_metadata.joblib")
 
         # 2. Save the cleaned dataframe to a local SQLite database
@@ -436,7 +470,7 @@ if __name__ == "__main__":
         # Save the absolute latest PRA for every player so our API can use it for live injuries
         print("Saving latest player PRAs for live injury calculations...")
         latest_players = processed_players_df.sort_values('GAME_DATE').groupby('PLAYER_NAME').tail(1)
-        latest_players[['PLAYER_NAME', 'TEAM_ABBREVIATION', 'ROLLING_PRA']].to_sql('player_stats', conn, if_exists='replace', index=False)
+        latest_players[['PLAYER_NAME', 'TEAM_ABBREVIATION', 'ROLLING_PRA', 'ROLLING_MIN']].to_sql('player_stats', conn, if_exists='replace', index=False)
         
         conn.close()
         print("Data saved to local database 'nba_data.db'")

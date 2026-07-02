@@ -9,3 +9,5 @@ joblib
 scipy
 requests
 lxml
+matplotlib
+pytest
